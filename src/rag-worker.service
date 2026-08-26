@@ -1,0 +1,15 @@
+[Unit]
+Description=RAG Memory Gateway (FastAPI -> 9Router)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/rag-venv
+ExecStart=/root/rag-venv/bin/python /root/rag-venv/main_gemini.py
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=9Router AI Smart Router
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment=PATH=/root/.hermes/node/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/root
+WorkingDirectory=/root
+ExecStart=/usr/local/bin/9router -p 20128 -H 0.0.0.0 -n -l --skip-update
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
