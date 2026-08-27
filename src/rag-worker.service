@@ -1,15 +1,18 @@
 [Unit]
-Description=RAG Memory Gateway (FastAPI -> 9Router)
-After=network.target
+Description=Hermes RAG Gateway (FastAPI to 9Router)
+Wants=network-online.target
+After=network-online.target 9router.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/rag-venv
-ExecStart=/root/rag-venv/bin/python /root/rag-venv/main_gemini.py
-Restart=always
+WorkingDirectory=/opt/hermes-rag-architecture
+EnvironmentFile=/etc/hermes-rag-gateway.env
+ExecStart=/opt/hermes-rag-architecture/.venv/bin/python -m rag_gateway
+Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

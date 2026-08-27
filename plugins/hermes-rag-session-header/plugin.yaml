@@ -1,0 +1,4 @@
+name: hermes-rag-session-header
+version: "0.1.0"
+description: "Adds the active Hermes session ID to RAG gateway provider requests."
+author: "Hermes RAG Architecture contributors"

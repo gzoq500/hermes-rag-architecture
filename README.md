@@ -1,91 +1,122 @@
-# Hermes Enterprise BIG RAG Architecture
+# Hermes RAG Architecture
 
-Repository ini berisi checkpoint lengkap arsitektur Enterprise RAG (Zilliz Cloud + Google Gemini 3072D) untuk Hermes Agent. Sistem ini dirancang untuk menahan _context window_ hingga **500.000 Token** tanpa halusinasi, dan menekan biaya API secara drastis dengan men- _offload_ ingatan lawas ke Vector Database.
+[![CI](https://github.com/KezemGolem/hermes-rag-architecture/actions/workflows/ci.yml/badge.svg)](https://github.com/KezemGolem/hermes-rag-architecture/actions/workflows/ci.yml)
 
-Dibangun oleh Kezem untuk Golem.
+An OpenAI-compatible FastAPI gateway that sits between Hermes Agent and 9Router. It forwards a bounded, structurally valid recent context, archives older user/assistant/tool messages in Zilliz Cloud (Milvus), and recalls session-scoped memories using Gemini embeddings.
 
----
+This project can reduce the amount of conversation history sent upstream when the input exceeds the configured suffix. Actual token, latency, quality, and cost changes depend on workload and configuration and must be measured. Retrieval does not guarantee factual accuracy or eliminate hallucinations.
 
-## 🏗️ Topologi Final
+## Architecture
 
-*   **Hermes Gateway:** Berjalan dengan `context_length: 500000`. Kompresi bawaan **dimatikan** (`compression: enabled: false`) agar kode 100+ file tidak pernah terpotong/diringkas oleh LLM pusat.
-*   **RAG Proxy Worker (Port 20128):** Interceptor berbasis Python FastAPI. Bertugas mencegat API Chat ke 9Router:
-    *   **Real-time Ingestion:** Menyedot chat (User/Assistant) dan alat (Tool) menjadi Vektor 3072 Dimensi. Menggunakan "Intelligent Chunking" (potong per baris baru, batas 8K char) agar _script_ utuh.
-    *   **RAG Retrieval:** Jika pertanyaan User > 10 karakter, Proxy mencari 3 ingatan teratas di Zilliz, dan otomatis menyuntikkannya ke `System Prompt` dengan tag `[ARCHIVED MEMORY RECALLED FROM ZILLIZ CLOUD]`.
-    *   **UI Bypass:** Jika URL mengandung kata `test` atau rute UI Dashboard Next.js, Proxy meneruskannya mentah-mentah ke port 20130.
-*   **9Router Asli (Port 20130):** Digeser dari 20128 ke 20130. Berfungsi murni untuk me-_routing_ ke API LLM (cbai/codebuddy/dll).
-*   **Zilliz Cloud (AWS ap-southeast-1):** _Serverless Vector Database_, menyimpan koleksi `hermes_gemini_memory`.
-*   **Google Gemini API:** Menggunakan model `models/gemini-embedding-2` sebagai mesin _embedder_ (Gratis via Google AI Studio).
+- **RAG gateway:** `0.0.0.0:20128` by default.
+- **9Router:** shifted to `0.0.0.0:20130`.
+- **Chat endpoint:** `/v1/chat/completions` is reduced, recalled, archived, and proxied.
+- **Other routes:** transparently proxied to 9Router; FastAPI docs/OpenAPI routes are disabled so `/docs`, `/openapi.json`, and all other non-chat paths reach 9Router.
+- **Memory:** deterministic record IDs plus Milvus upsert avoid duplicate records when clients resend full history.
+- **Schema:** creation is idempotent and non-destructive unless reset is explicitly enabled.
 
----
+### Context policy
 
-## 🚀 Panduan Migrasi / Instalasi di VPS Baru
+The gateway always preserves `system` and `developer` messages. It also keeps a configurable recent conversation suffix (`RAG_RECENT_MESSAGES`) and expands the boundary when necessary to keep assistant tool calls with their tool results. Older user, assistant, and tool messages are queued for bounded background ingestion rather than forwarded upstream. Retrieved memory is inserted as a developer message with real newline characters.
 
-Jika VPS mengalami migrasi atau _wipe_ data, ikuti langkah ini secara berurutan pada VPS yang akan menjadi rumah 9Router (misal VPS 133).
+## Requirements
 
-### 1. Persiapan Environment RAG
+- Python 3.10 or 3.11
+- 9Router
+- A Zilliz Cloud or Milvus endpoint
+- A Gemini API key with access to the configured embedding model
+
+No production credentials are included. Do not place secrets in source files or service units.
+
+## Install
+
 ```bash
-# Pastikan Python 3 dan venv terinstall
-sudo apt-get update && sudo apt-get install -y python3-pip python3-venv
-
-# Buat Virtual Environment khusus RAG
-python3 -m venv /root/rag-venv
-
-# Install library utama (JANGAN pakai pip global agar tidak merusak paket OS)
-/root/rag-venv/bin/pip install fastapi uvicorn httpx pymilvus
+git clone https://github.com/KezemGolem/hermes-rag-architecture.git
+cd hermes-rag-architecture
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+sudo install -m 0600 .env.example /etc/hermes-rag.env
 ```
 
-### 2. Konfigurasi Zilliz Cloud (Satu Kali Saja Jika Koleksi Hilang)
-Jika Zilliz Cloud kamu juga baru / direset, kamu harus membuat Skema _Database_ nya.
-1. Edit file `src/create_schema_gemini.py` dan masukkan **ZILLIZ TOKEN** aslimu.
-2. Jalankan:
-   ```bash
-   /root/rag-venv/bin/python src/create_schema_gemini.py
-   ```
-*(Ini akan membuat koleksi `hermes_gemini_memory` berdimensi 3072).*
+Edit `/etc/hermes-rag.env` and replace only the credential/endpoint examples. The process fails at startup with the names of missing required variables; it never includes their values in the error.
 
-### 3. Deploy Worker RAG
-1. Salin `src/main_gemini.py` ke `/root/rag-venv/main_gemini.py`.
-2. Edit `/root/rag-venv/main_gemini.py`:
-   *   Ganti `<REPLACE_WITH_ZILLIZ_TOKEN>` dengan rahasia Zilliz kamu.
-   *   Ganti `<REPLACE_WITH_GOOGLE_GEMINI_KEY>` dengan kunci Google AI Studio.
-3. Salin konfigurasi _Service_ Systemd ke OS:
-   ```bash
-   cp src/rag-worker.service /etc/systemd/system/rag-worker.service
-   systemctl daemon-reload
-   systemctl enable --now rag-worker.service
-   ```
+Required variables:
 
-### 4. Menggeser 9Router Asli ke Port 20130
-Karena RAG Worker kita mengambil alih singgasana port `20128`, 9Router asli **harus** dipindah.
-1. Edit file Systemd milik 9Router (biasanya di `/etc/systemd/system/9router.service`).
-2. Cari bagian `ExecStart` dan ubah portnya dari `-p 20128` menjadi `-p 20130`.
-   *(Kamu bisa melihat contohnya di file `src/9router-shifted.service` repo ini).*
-3. Restart 9Router:
-   ```bash
-   systemctl daemon-reload
-   systemctl restart 9router.service
-   ```
+- `ZILLIZ_URI`
+- `ZILLIZ_TOKEN`
+- `GEMINI_API_KEY`
 
-### 5. Konfigurasi Agen Hermes (Telegram)
-Di `config.yaml` milik Hermes kamu, pastikan _Custom Provider_ menunjuk ke Port 20128 (Jalur RAG), bukan Port 20130:
-```yaml
-custom_providers:
-  - name: Circuit03
-    base_url: http://127.0.0.1:20128/v1
-    key_env: HERMES_CUSTOM_KEY
+All supported tunables and defaults are documented in `.env.example`, including retrieval count, recent suffix size, chunk size, ingestion bound, timeouts, ports, model, dimensions, database path, and explicit schema reset.
 
-agent:
-  context_length: 500000
+## Create or verify the collection
 
-compression:
-  enabled: false
+Run from the repository root:
+
+```bash
+set -a
+. /etc/hermes-rag.env
+set +a
+.venv/bin/python -m src.create_schema_gemini
 ```
 
-### 6. Verifikasi Kesuksesan
-1. Buka Dashboard 9Router via IP VPS (Port `20128`). Harus bisa login normal tanpa layar putih.
-2. Tes koneksi LLM model di menu _Available Models_. Harus hijau.
-3. Obrolkan sesuatu ke Telegram Hermes.
-4. Cek log `journalctl -u rag-worker.service -f` dan pastikan muncul log `[RAG] Auto-upserted real-time memory`.
+If the collection already exists, this command leaves it unchanged. To intentionally delete and recreate it, set `RAG_RESET_COLLECTION=true` for that invocation only. Reset destroys the collection's existing records.
 
-Selesai. Sistem Enterprise BIG RAG telah pulih.
+## systemd
+
+Install the service examples after placing the repository at `/opt/hermes-rag-architecture`:
+
+```bash
+sudo cp src/9router-shifted.service /etc/systemd/system/9router.service
+sudo cp src/rag-worker.service /etc/systemd/system/rag-worker.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now 9router.service rag-worker.service
+```
+
+`rag-worker.service` reads `/etc/hermes-rag.env` through `EnvironmentFile=`. `9router-shifted.service` listens on port `20130`; the gateway listens on `20128`.
+
+## Session isolation
+
+Session resolution uses this priority:
+
+1. `X-Hermes-Session-Id` request header
+2. OpenAI-compatible payload `user`
+3. Parameterized lookup of the latest matching `role = 'user'` row in Hermes SQLite
+4. `default_session` fallback, with a warning
+
+Exact isolation depends on clients sending `X-Hermes-Session-Id` or `user`. The SQLite fallback is robust for ordinary transcript requests but content matching can be ambiguous when identical user messages exist in multiple sessions.
+
+### Optional Hermes 0.20.5 middleware plugin
+
+The included `plugins/hermes-rag-session-header` plugin uses the verified Hermes 0.20.5 `llm_request` middleware contract. It copies middleware `session_id` into `extra_headers.X-Hermes-Session-Id` without patching Hermes core.
+
+```bash
+mkdir -p "${HERMES_HOME:-$HOME/.hermes}/plugins/hermes-rag-session-header"
+cp plugins/hermes-rag-session-header/{__init__.py,plugin.yaml} \
+  "${HERMES_HOME:-$HOME/.hermes}/plugins/hermes-rag-session-header/"
+hermes plugins enable hermes-rag-session-header
+```
+
+Restart the Hermes process/gateway after enabling it. Confirm enablement with `hermes plugins`. This plugin contract was checked against installed Hermes Agent `0.20.5`; re-check the official Hermes plugin/middleware documentation when using another version.
+
+## Streaming behavior
+
+For streaming chat requests, the gateway opens the upstream response before returning SSE. Upstream 401 and 5xx responses retain their status and body rather than becoming HTTP 200 streams. The incremental parser tolerates UTF-8 and SSE records split across arbitrary network chunks, captures visible assistant content and common reasoning fields for archival, and closes upstream response/client resources on completion, disconnect, or error.
+
+## Development and tests
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-test.txt
+.venv/bin/python -m pytest -q
+.venv/bin/python -m compileall -q rag_gateway src plugins tests
+```
+
+CI runs the same pytest and compileall checks on Python 3.10 and 3.11. See `AGENTS.md` and `CLAUDE.md` for contributor rules.
+
+## Operational notes
+
+- Old-context ingestion runs after the response path is established and is bounded by `RAG_MAX_INGEST_RECORDS_PER_REQUEST`; failures are logged without failing inference.
+- Existing deterministic IDs are queried before embedding so repeated request history is not embedded/upserted again.
+- Retrieval itself remains part of request latency because relevant memories must be available before the upstream call.
+- Logs report outcomes and exception classes, not credential values or request content.
+- Measure upstream input size and end-to-end quality on your own workload before choosing context/retrieval settings.

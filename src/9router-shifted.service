@@ -1,15 +1,17 @@
 [Unit]
-Description=9Router AI Smart Router
-After=network.target
+Description=9Router AI Smart Router (upstream for Hermes RAG)
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
 User=root
+EnvironmentFile=-/etc/9router.env
 Environment=PATH=/root/.hermes/node/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/root
 WorkingDirectory=/root
-ExecStart=/usr/local/bin/9router -p 20128 -H 0.0.0.0 -n -l --skip-update
-Restart=always
+ExecStart=/usr/local/bin/9router -p 20130 -H 127.0.0.1 -n -l --skip-update
+Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
 
