@@ -44,26 +44,50 @@ def escape_milvus_string(value: str) -> str:
 
 
 class GeminiEmbedder:
-    def __init__(self, api_key: str, model: str, timeout: float):
-        self._api_key = api_key
+    def __init__(self, api_keys: list[str], model: str, timeout: float):
+        if not api_keys:
+            raise ValueError("At least one API key is required")
+        self._api_keys = api_keys
+        self._current_idx = 0
         self._model = model
         self._timeout = timeout
 
     def embed(self, text: str) -> list[float] | None:
+        import time
         url = f"https://generativelanguage.googleapis.com/v1beta/{self._model}:embedContent"
-        try:
-            response = httpx.post(
-                url,
-                params={"key": self._api_key},
-                json={"model": self._model, "content": {"parts": [{"text": text}]}},
-                timeout=self._timeout,
-            )
-            response.raise_for_status()
-            values = response.json()["embedding"]["values"]
-            return [float(value) for value in values]
-        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-            logger.warning("Embedding request failed: %s", exc.__class__.__name__)
-            return None
+        max_attempts = max(1, len(self._api_keys) * 2)
+        
+        for attempt in range(max_attempts):
+            key = self._api_keys[self._current_idx]
+            try:
+                response = httpx.post(
+                    url,
+                    params={"key": key},
+                    json={"model": self._model, "content": {"parts": [{"text": text}]}},
+                    timeout=self._timeout,
+                )
+                if response.status_code == 429:
+                    logger.warning(f"ECC/Failover: Gemini Key index {self._current_idx} rate limited (429). Rotating...")
+                    self._current_idx = (self._current_idx + 1) % len(self._api_keys)
+                    time.sleep(1.0)
+                    continue
+                response.raise_for_status()
+                values = response.json()["embedding"]["values"]
+                return [float(value) for value in values]
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    logger.warning(f"ECC/Failover: Gemini Key index {self._current_idx} rate limited (429). Rotating...")
+                    self._current_idx = (self._current_idx + 1) % len(self._api_keys)
+                    time.sleep(1.0)
+                    continue
+                logger.warning("Embedding request failed: %s", exc.__class__.__name__)
+                return None
+            except Exception as exc:
+                logger.warning("Embedding request failed: %s", exc.__class__.__name__)
+                return None
+        
+        logger.error("ECC/Failover: All Gemini API keys exhausted or rate limited.")
+        return None
 
 
 @dataclass(frozen=True)

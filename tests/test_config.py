@@ -7,12 +7,12 @@ def valid_environment():
     return {
         "ZILLIZ_URI": "https://example.zillizcloud.com:19532",
         "ZILLIZ_TOKEN": "top-secret-zilliz",
-        "GEMINI_API_KEY": "top-secret-gemini",
+        "GEMINI_API_KEYS": "top-secret-gemini,key2",
     }
 
 
 def test_settings_fail_clearly_when_required_credentials_are_missing():
-    with pytest.raises(ConfigurationError, match="ZILLIZ_URI, ZILLIZ_TOKEN, GEMINI_API_KEY"):
+    with pytest.raises(ConfigurationError, match="ZILLIZ_URI, ZILLIZ_TOKEN, GEMINI_API_KEYS"):
         Settings.from_env({})
 
 
@@ -35,6 +35,7 @@ def test_settings_read_tunables_and_do_not_expose_secrets():
     rendered = repr(settings)
     assert "top-secret-zilliz" not in rendered
     assert "top-secret-gemini" not in rendered
+    assert "key2" not in rendered
 
 
 def test_invalid_numeric_tunable_has_actionable_error():

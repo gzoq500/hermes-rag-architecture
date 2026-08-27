@@ -39,7 +39,7 @@ def settings(tmp_path):
     return Settings(
         zilliz_uri="https://example.invalid",
         zilliz_token="secret",
-        gemini_api_key="secret",
+        gemini_api_keys=["secret"],
         db_path=str(tmp_path / "missing.db"),
         recent_messages=2,
         retrieval_min_chars=999,

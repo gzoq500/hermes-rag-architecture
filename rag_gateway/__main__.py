@@ -17,7 +17,7 @@ def build_app():
     settings = Settings.from_env()
     milvus_client = MilvusClient(uri=settings.zilliz_uri, token=settings.zilliz_token)
     embedder = GeminiEmbedder(
-        settings.gemini_api_key,
+        settings.gemini_api_keys,
         settings.embedding_model,
         settings.embedding_timeout_seconds,
     )

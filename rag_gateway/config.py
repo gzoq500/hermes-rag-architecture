@@ -35,7 +35,7 @@ def _boolean(environment: Mapping[str, str], name: str, default: bool) -> bool:
 class Settings:
     zilliz_uri: str = field(repr=False)
     zilliz_token: str = field(repr=False)
-    gemini_api_key: str = field(repr=False)
+    gemini_api_keys: list[str] = field(repr=False)
     collection_name: str = "hermes_gemini_memory"
     db_path: str = "~/.hermes/state.db"
     router_base_url: str = "http://127.0.0.1:20130"
@@ -54,8 +54,15 @@ class Settings:
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> "Settings":
         env = os.environ if environment is None else environment
-        required = ("ZILLIZ_URI", "ZILLIZ_TOKEN", "GEMINI_API_KEY")
+        required = ("ZILLIZ_URI", "ZILLIZ_TOKEN")
         missing = [name for name in required if not env.get(name, "").strip()]
+        
+        # Support either comma-separated list or single key fallback
+        keys_raw = env.get("GEMINI_API_KEYS") or env.get("GEMINI_API_KEY", "")
+        keys = [k.strip() for k in keys_raw.split(",") if k.strip()]
+        if not keys:
+            missing.append("GEMINI_API_KEYS")
+
         if missing:
             raise ConfigurationError(
                 "Missing required environment variables: " + ", ".join(missing)
@@ -68,7 +75,7 @@ class Settings:
         return cls(
             zilliz_uri=env["ZILLIZ_URI"],
             zilliz_token=env["ZILLIZ_TOKEN"],
-            gemini_api_key=env["GEMINI_API_KEY"],
+            gemini_api_keys=keys,
             collection_name=env.get("ZILLIZ_COLLECTION", "hermes_gemini_memory"),
             db_path=os.path.expanduser(env.get("HERMES_DB_PATH", "~/.hermes/state.db")),
             router_base_url=env.get("ROUTER_BASE_URL", "http://127.0.0.1:20130").rstrip("/"),
