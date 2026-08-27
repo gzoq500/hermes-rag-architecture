@@ -1,4 +1,7 @@
+from types import SimpleNamespace
+
 from rag_gateway.memory import (
+    GeminiEmbedder,
     MemoryRecord,
     archive_messages,
     deterministic_record_id,
@@ -100,6 +103,52 @@ def test_archive_uses_upsert_and_deduplicates_repeated_request_history():
     first_batch = client.upsert_calls[0]["data"]
     assert len(first_batch) == 3
     assert {record["role"] for record in first_batch} == {"user", "assistant", "tool"}
+
+
+def test_archive_deduplicates_identical_ids_inside_one_batch():
+    client = FakeMilvus()
+    message = {"role": "user", "content": "same long content"}
+
+    count = archive_messages(
+        client,
+        FakeEmbedder(),
+        "session",
+        [message, message],
+        100,
+        1,
+    )
+
+    assert count == 1
+    assert len(client.upsert_calls) == 1
+    assert len(client.upsert_calls[0]["data"]) == 1
+
+
+def test_embedder_opens_circuit_when_all_keys_are_rate_limited(monkeypatch):
+    calls = []
+    now = [1000.0]
+
+    def fake_post(url, *, params, json, timeout):
+        calls.append(params["key"])
+        return SimpleNamespace(status_code=429)
+
+    monkeypatch.setattr("rag_gateway.memory.httpx.post", fake_post)
+    monkeypatch.setattr("rag_gateway.memory.time.monotonic", lambda: now[0])
+
+    embedder = GeminiEmbedder(
+        ["key-one", "key-two"],
+        "models/gemini-embedding-2",
+        10,
+        cooldown_seconds=60,
+    )
+
+    assert embedder.embed("first") is None
+    assert calls == ["key-one", "key-two"]
+    assert embedder.embed("second") is None
+    assert calls == ["key-one", "key-two"]
+
+    now[0] += 61
+    assert embedder.embed("third") is None
+    assert calls == ["key-one", "key-two", "key-one", "key-two"]
 
 
 def test_escape_milvus_string_handles_quotes_backslashes_and_controls():

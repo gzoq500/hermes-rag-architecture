@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 import logging
+import threading
+import time
 from typing import Any, Protocol
 
 import httpx
@@ -44,21 +46,42 @@ def escape_milvus_string(value: str) -> str:
 
 
 class GeminiEmbedder:
-    def __init__(self, api_keys: list[str], model: str, timeout: float):
+    def __init__(
+        self,
+        api_keys: list[str],
+        model: str,
+        timeout: float,
+        *,
+        cooldown_seconds: float = 60.0,
+    ):
         if not api_keys:
             raise ValueError("At least one API key is required")
         self._api_keys = api_keys
         self._current_idx = 0
         self._model = model
         self._timeout = timeout
+        self._cooldown_seconds = cooldown_seconds
+        self._cooldown_until = [0.0 for _ in api_keys]
+        self._state_lock = threading.Lock()
+        self._last_exhausted_log_at = 0.0
 
     def embed(self, text: str) -> list[float] | None:
-        import time
         url = f"https://generativelanguage.googleapis.com/v1beta/{self._model}:embedContent"
-        max_attempts = max(1, len(self._api_keys) * 2)
-        
-        for attempt in range(max_attempts):
-            key = self._api_keys[self._current_idx]
+        now = time.monotonic()
+        with self._state_lock:
+            indexes = [
+                (self._current_idx + offset) % len(self._api_keys)
+                for offset in range(len(self._api_keys))
+                if self._cooldown_until[
+                    (self._current_idx + offset) % len(self._api_keys)
+                ] <= now
+            ]
+
+        if not indexes:
+            return None
+
+        for index in indexes:
+            key = self._api_keys[index]
             try:
                 response = httpx.post(
                     url,
@@ -67,26 +90,39 @@ class GeminiEmbedder:
                     timeout=self._timeout,
                 )
                 if response.status_code == 429:
-                    logger.warning(f"ECC/Failover: Gemini Key index {self._current_idx} rate limited (429). Rotating...")
-                    self._current_idx = (self._current_idx + 1) % len(self._api_keys)
-                    time.sleep(1.0)
+                    with self._state_lock:
+                        self._cooldown_until[index] = (
+                            time.monotonic() + self._cooldown_seconds
+                        )
+                        self._current_idx = (index + 1) % len(self._api_keys)
+                    logger.warning(
+                        "ECC/Failover: Gemini key index %d rate limited; "
+                        "cooling down for %.0fs",
+                        index,
+                        self._cooldown_seconds,
+                    )
                     continue
                 response.raise_for_status()
                 values = response.json()["embedding"]["values"]
+                with self._state_lock:
+                    self._cooldown_until[index] = 0.0
+                    self._current_idx = (index + 1) % len(self._api_keys)
                 return [float(value) for value in values]
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 429:
-                    logger.warning(f"ECC/Failover: Gemini Key index {self._current_idx} rate limited (429). Rotating...")
-                    self._current_idx = (self._current_idx + 1) % len(self._api_keys)
-                    time.sleep(1.0)
-                    continue
                 logger.warning("Embedding request failed: %s", exc.__class__.__name__)
                 return None
             except Exception as exc:
                 logger.warning("Embedding request failed: %s", exc.__class__.__name__)
                 return None
-        
-        logger.error("ECC/Failover: All Gemini API keys exhausted or rate limited.")
+        now = time.monotonic()
+        with self._state_lock:
+            should_log = now - self._last_exhausted_log_at >= self._cooldown_seconds
+            if should_log:
+                self._last_exhausted_log_at = now
+        if should_log:
+            logger.warning(
+                "ECC/Failover: All Gemini API keys are cooling down after rate limits"
+            )
         return None
 
 
@@ -162,7 +198,7 @@ def archive_messages(
     chunk_max_chars: int = 8000,
     max_records: int = 32,
 ) -> int:
-    candidates = [
+    raw_candidates = [
         record
         for message in messages
         for record in MemoryRecord.from_message(
@@ -170,6 +206,7 @@ def archive_messages(
         )
         if len(record.text) >= minimum_chars
     ]
+    candidates = list({record.id: record for record in raw_candidates}.values())
     existing = _existing_record_ids(
         client, collection_name, [record.id for record in candidates]
     )
