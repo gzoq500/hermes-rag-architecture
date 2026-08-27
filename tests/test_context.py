@@ -78,6 +78,69 @@ def test_reduce_context_moves_boundary_before_entire_tool_result_group():
     assert archived == [messages[0]]
 
 
+def test_reduce_context_always_keeps_the_latest_user_message():
+    """A window that would start mid-turn must be expanded to include the user turn.
+
+    Strict OpenAI-compatible providers (CodeBuddy CN) reject requests whose
+    conversation opens with an assistant/tool sequence instead of a user
+    message (HTTP 400 code 11133). The reduction boundary must therefore
+    never drop the last user message of the conversation.
+    """
+    messages = [
+        {"role": "user", "content": "start of current turn"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": "result one"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c2", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "c2", "content": "result two"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c3", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "c3", "content": "result three"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c4", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "c4", "content": "result four"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c5", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "c5", "content": "result five"},
+    ]
+
+    forwarded, archived = reduce_context(messages, recent_limit=4)
+
+    assert forwarded[0]["role"] == "user"
+    assert forwarded[0]["content"] == "start of current turn"
+    assert forwarded == messages
+    assert archived == []
+
+
+def test_reduce_context_keeps_latest_user_when_boundary_lands_mid_turn():
+    """Even when older history exists, the boundary moves left to the last user turn."""
+    messages = [
+        {"role": "user", "content": "old turn"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "current turn"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "k1", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "k1", "content": "result"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "k2", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "k2", "content": "result two"},
+    ]
+
+    forwarded, archived = reduce_context(messages, recent_limit=3)
+
+    assert forwarded[0]["role"] == "user"
+    assert forwarded[0]["content"] == "current turn"
+    assert archived == [messages[0], messages[1]]
+
+
 def test_recalled_context_contains_real_newlines_and_is_a_developer_message():
     recalled = build_recalled_message(["USER: remembered", "TOOL: result"])
 

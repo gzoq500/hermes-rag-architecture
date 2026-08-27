@@ -62,6 +62,26 @@ def _expand_tool_boundary(messages: list[dict[str, Any]], start: int) -> int:
     return assistant_index
 
 
+def _expand_to_user_turn_start(messages: list[dict[str, Any]], start: int) -> int:
+    """Move a suffix boundary left so the window opens on the latest user message.
+
+    Strict OpenAI-compatible providers (CodeBuddy CN, error 11133) reject a
+    conversation that opens with an assistant/tool sequence instead of a user
+    message, so a window must never start mid-turn. Only expand when the LAST
+    user message of the conversation falls outside the window; a user message
+    already inside the window satisfies the provider requirement and the
+    configured recent_limit keeps its bound.
+    """
+    last_user = -1
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            last_user = index
+            break
+    if last_user == -1 or last_user >= start:
+        return start
+    return last_user
+
+
 def reduce_context(
     messages: list[dict[str, Any]], recent_limit: int
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -80,6 +100,7 @@ def reduce_context(
         suffix_position = max(0, len(conversation_indexes) - recent_limit)
         conversational = [copied[index] for index in conversation_indexes]
         suffix_position = _expand_tool_boundary(conversational, suffix_position)
+        suffix_position = _expand_to_user_turn_start(conversational, suffix_position)
         keep_conversation.update(conversation_indexes[suffix_position:])
     keep_indexes = instruction_indexes | keep_conversation
     forwarded = [message for index, message in enumerate(copied) if index in keep_indexes]
